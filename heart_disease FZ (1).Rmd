@@ -1,0 +1,364 @@
+---
+title: "An Investigation into the Prediction of Heart Disease"
+author: "Fengyi Zhao"
+date: "6/3/2022"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(gdata)
+library(ggplot2)
+library(magrittr)
+library("ggpubr")
+library(dplyr)
+library(pwr)
+library(corrplot)
+library(gridExtra)
+library(grid)
+library(lattice)
+library(glmnet)
+library(gbm)
+library(ISLR)
+library(tree)
+library(rpart)
+library(randomForest)
+library(ranger)
+library(xgboost)
+library(vip)
+library(caret)
+```
+
+```{r echo=FALSE, include=FALSE}
+data <- read.csv("/Users/littlewindcoat/Desktop/heart_2020_cleaned.csv")
+head(data)
+```
+```{r echo=FALSE, include=FALSE}
+dim(data)
+```
+
+There are 17 input features and one target variable
+
+```{r echo=FALSE, include=FALSE}
+dim(data[data$HeartDisease=="Yes",])
+```
+
+```{r echo=FALSE, include=FALSE}
+dim(data[data$HeartDisease=="No",])
+```
+
+```{r echo=FALSE, include=FALSE}
+data_no <- sample_n(data[data$HeartDisease=="No",], 25000)
+data_yes <- sample_n(data[data$HeartDisease=="Yes",], 25000)
+```
+
+```{r echo=FALSE, include=FALSE}
+data <- rbind(data_no, data_yes)
+```
+
+```{r echo=FALSE, include=FALSE}
+dim(data)
+```
+
+# Data Cleaning and Feature Engineering
+
+```{r setup}
+unique(data$AgeCategory)
+unique(data$Race)
+unique(data$GenHealth)
+```
+
+
+```{r data preprocessing}
+data_cleaned <- data %>%
+  mutate(HeartDisease = ifelse(HeartDisease=="Yes", 1, 0),
+         Smoking = ifelse(Smoking=="Yes", 1, 0),
+         AlcoholDrinking = ifelse(AlcoholDrinking=="Yes", 1, 0),
+         Stroke = ifelse(Stroke=="Yes", 1, 0),
+         DiffWalking = ifelse(DiffWalking=="Yes", 1, 0),
+         Sex_female = ifelse(Sex=="Female", 1, 0),
+         Diabetic = ifelse(Diabetic=="Yes", 1, 0),
+         PhysicalActivity = ifelse(PhysicalActivity=="Yes", 1, 0),
+         Asthma = ifelse(Asthma=="Yes", 1, 0),
+         KidneyDisease = ifelse(KidneyDisease=="Yes", 1, 0),
+         SkinCancer = ifelse(SkinCancer=="Yes", 1, 0),
+         Age = case_when(
+           AgeCategory == "55-59" ~ 57,
+           AgeCategory == "80 or older"  ~ 80,
+           AgeCategory == "65-69"  ~ 67,
+           AgeCategory == "75-79" ~ 77,
+           AgeCategory == "40-44" ~ 42,
+           AgeCategory == "70-74" ~ 72,
+           AgeCategory == "60-64" ~ 62,
+           AgeCategory == "50-54" ~ 52,
+           AgeCategory == "45-49" ~ 47,
+           AgeCategory == "18-24" ~ 21,
+           AgeCategory == "35-39" ~ 37,
+           AgeCategory == "30-34" ~ 32,
+           AgeCategory == "25-29" ~ 27
+         ),
+         GenHealth = case_when(
+           GenHealth == "Very good" ~ 4,
+           GenHealth == "Fair" ~ 2,
+           GenHealth == "Good" ~ 3,
+           GenHealth == "Poor" ~ 1,
+           GenHealth == "Excellent" ~ 5
+         ),
+         Race_White = ifelse(Race=="White", 1, 0),
+         Race_Black = ifelse(Race=="Black", 1, 0),
+         Race_Asian = ifelse(Race=="Asian", 1, 0),
+         Race_Amer_Indian = ifelse(Race=="American Indian/Alaskan Native", 1, 0),
+         Race_Other = ifelse(Race=="Other", 1, 0),
+         Race_Hispanic = ifelse(Race=="Hispanic", 1, 0)
+         ) %>%
+  select(-Race, -AgeCategory, -Sex)
+head(data_cleaned)
+```
+
+```{r echo=FALSE, include=FALSE}
+colSums(is.na(data_cleaned))
+```
+
+
+
+# Exploratory Data Analysis
+
+
+```{r exploratory data analysis.}
+boxplot(data_cleaned[data_cleaned$HeartDisease==1,]$PhysicalHealth, data_cleaned[data_cleaned$HeartDisease==0,]$PhysicalHealth, names=c("Yes", "No"), col = c("tan1", "steelblue3"),
+          ylab = "Physical Health", xlab = "Heart Disease", main="Distribution of Physical Health by Heart Disease") 
+```
+
+
+```{r exploratory data analysis..}
+boxplot(data_cleaned[data_cleaned$HeartDisease==1,]$Age, data_cleaned[data_cleaned$HeartDisease==0,]$Age, names=c("Yes", "No"), col = c("tan1", "steelblue3"),
+          ylab = "Age", xlab = "Heart Disease", main="Distribution of Age by Heart Disease") 
+```
+
+
+```{r exploratory data analysis...}
+res <- cor(data_cleaned)
+corrplot(res, type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 90, mar=c(0,0,2,0), title = "Correlation Matrix")
+```
+
+# Methods
+
+
+### Split Heldout Set
+
+The whole dataset is split into a training set and a heldout set with 80% and 20% of the data respectively. The heldout set is never used in the model training process, and the training set is used to tune the parameters of models as well as train the final models. During the parameter tuning process, the training set will be further split into training and validation sets. A random seed of 2022 is set for the reproducibility purpose.
+
+```{r split}
+# set random seed
+set.seed(2022)
+
+# split training set and held-out testing set: 20% of the data is used for testing set.
+test <- sample(dim(data_cleaned)[1], size = round(0.2*dim(data_cleaned)[1]))
+data_test <- data_cleaned[test,]
+data_train <- data_cleaned[-test,]
+```
+
+
+## Lasso
+
+```{r lasso}
+# separate input features and target variable
+X_train <- model.matrix(HeartDisease ~ ., data = data_train)[, -1]
+Y_train <- data_train$HeartDisease
+X_test <- model.matrix(HeartDisease ~ ., data = data_test)[, -1]
+Y_test <- data_test$HeartDisease
+```
+
+```{r lasso.}
+# a cross-validated lasso method is implemented on the training set (80% of the data).
+cv.lasso <- cv.glmnet(X_train, Y_train, family="binomial")
+
+# The lambda.1se (largest value of lambda such that error is within 1 standard error of the cross-validated errors for lambda.min) is considered as the best lambda here.
+best.lam <- cv.lasso$lambda.1se
+
+# The best lambda value is used to train the final model.
+fit.glmnet <- glmnet(X_train, Y_train, family="binomial", lambda = best.lam)
+```
+
+```{r lasso plot}
+plot(cv.lasso)
+```
+
+
+```{r ..}
+# look at the final model's coefficients (focus on the non-zero coefficients)
+predict(fit.glmnet,type="coef")
+```
+
+
+```{r echo=FALSE, include=FALSE}
+pred <- predict(fit.glmnet, newx = X_test, type="response")
+classification <- ifelse(pred > .5, 1, 0)
+correct_classification <- ifelse(classification == Y_test, 1, 0)
+accuracy_lasso = sum(correct_classification)/length(correct_classification)
+accuracy_lasso
+```
+
+
+```{r echo=FALSE}
+table(as.factor(Y_test), as.factor(classification))
+```
+
+
+
+
+## Decision Tree
+
+```{r tree}
+# Validation set
+val <- sample(dim(data_train)[1], 0.25*dim(data_train)[1])
+```
+
+
+```{r tree..}
+mycontrol.success = tree.control(nrow(X_train[-val,]), mincut = 5, minsize = 10, mindev = 0.0005)
+lc.full.tree.success=tree(HeartDisease ~ .,control = mycontrol.success, data_train[-val,])
+summary(lc.full.tree.success)
+```
+
+``````{r tree...}
+accuracy <- function(classifications, actuals){
+  correct_classifications <- ifelse(classifications == actuals, 1, 0)
+  acc <- sum(correct_classifications)/length(classifications)
+  return(acc)
+}
+
+```
+
+```{r echo=FALSE, include=FALSE}
+#Training
+pruned_set = c(2,4,6,8,10,15,20,25,35,40,45,50)
+pruned_train_acc = rep(0, 12)
+pruned_valid_acc = rep(0, 12)
+
+for(i in 1:12){
+  pruned_tree <- prune.tree(lc.full.tree.success, best = pruned_set[i])
+  #validation
+  preds <- predict(pruned_tree,newdata=data_train[val,])
+  classifications <- ifelse(preds > .5, 1, 0)
+  pruned_valid_acc[i] <- accuracy(classifications, data_train[val,]$HeartDisease)
+  #Training
+  preds <- predict(pruned_tree,newdata=data_train[-val,])
+  classifications <- ifelse(preds > .5, 1, 0)
+  pruned_train_acc[i] <- accuracy(classifications, data_train[-val,]$HeartDisease)
+}
+ 
+#Plot
+pruned_data <- data.frame(pruned_set,pruned_train_acc,pruned_valid_acc)
+colnames(pruned_data) <- c('size','train_acc','valid_acc')
+pruned_data
+l1 <- pruned_data %>%
+  ggplot() +
+  #set line color and thickness 
+  geom_line(aes(x = size,   y=train_acc), color="steelblue3", size=1) +
+  geom_line(aes(x = size,   y=valid_acc), color="tan1", size=1) + 
+  labs(x = "size", y="Accuracy",
+       caption="Accuracy vs size (Blue:Training, Orange: Validation)")
+```
+
+
+
+```{r echo=FALSE, fig.width=7,fig.height=3,fig.cap="\\label{fig:tune_tree} Parameter tuning plot for decision tree model."}
+l1
+```
+
+
+From decision tree's parameter tuning step, the optimal parameter is selected as the smallest size with comparably best validation accuracy: size=35. With this optimal parameter, the final decision tree model is trained and pruned on the entire training set and tested on the heldout set (testing set). The overall testing accuracy is 0.7566, and the confusion matrix is shown below:
+
+
+```{r echo=FALSE, include=FALSE}
+mycontrol.success = tree.control(nrow(X_train), mincut = 5, minsize = 10, mindev = 0.0005)
+lc.full.tree.success=tree(HeartDisease ~ .,control = mycontrol.success, data_train)
+#summary(lc.full.tree.success)
+
+pruned_tree <- prune.tree(lc.full.tree.success, best = 35)
+#Testing
+preds <- predict(pruned_tree,newdata=data_test)
+classifications_test <- ifelse(preds > .5, 1, 0)
+test_acc <- accuracy(classifications_test, data_test$HeartDisease)
+#Training
+preds <- predict(pruned_tree,newdata=data_train)
+classifications_train <- ifelse(preds > .5, 1, 0)
+train_acc <- accuracy(classifications_train, data_train$HeartDisease)
+
+train_acc
+test_acc
+```
+
+
+
+```{r echo=FALSE}
+table(as.factor(Y_test), as.factor(classifications_test))
+```
+
+
+
+## Random Forest
+
+```{r rf}
+#Training
+mtry_set = c(1,2,3,4,5,6,7,8,9,10,11,12)
+mtry_train_acc = rep(0, 12)
+mtry_valid_acc = rep(0, 12)
+
+for(i in 1:12){
+  mtry.mod <- ranger(x = data_train[-val, !names(data_train) %in% c("HeartDisease")], y = data_train[-val,]$HeartDisease,
+                 mtry=mtry_set[i], num.trees=500,
+                 importance="impurity",
+                 probability = TRUE)
+  #validation
+  preds <- predict(mtry.mod, data=data_train[val, !names(data_train) %in% c("HeartDisease")])$predictions[,2]
+  classifications <- ifelse(preds>0.5, 1, 0)
+  mtry_valid_acc[i] <- accuracy(classifications, data_train[val,]$HeartDisease)
+  
+  #Training
+  preds <- predict(mtry.mod, data=data_train[-val, !names(data_train) %in% c("HeartDisease")])$predictions[,2]
+  classifications <- ifelse(preds > .5, 1, 0)
+  mtry_train_acc[i] <- accuracy(classifications, data_train[-val,]$HeartDisease)
+}
+ 
+#Plot
+mtry_data <- data.frame(mtry_set,mtry_train_acc,mtry_valid_acc)
+colnames(mtry_data) <- c('size', 'train_acc', 'valid_acc')
+```
+
+
+```{r rf..}
+p <- mtry_data %>%
+  ggplot() +
+  #set line color and thickness 
+  geom_line(aes(x = size,   y=train_acc), color="steelblue3", size=1) +
+  geom_line(aes(x = size,   y=valid_acc), color="tan1", size=1) + 
+  labs(x = "size", y="Accuracy",
+       caption="Accuracy vs size (Blue:Training, Orange: Validation)")
+p
+```
+
+
+
+```{r rf tuning}
+rf.mod <- ranger(x = data_train[, !names(data_train) %in% c("HeartDisease")], y = data_train$HeartDisease,
+                 mtry=4, num.trees=500,
+                 importance="impurity",
+                 probability = TRUE)
+
+rf_preds <- predict(rf.mod, data=data_test[, !names(data_train) %in% c("HeartDisease")])$predictions[,2]
+rf_classifications <- ifelse(rf_preds>0.5, 1, 0)
+rf_acc <- mean(ifelse(rf_classifications == data_test$HeartDisease, 1, 0))
+rf_acc
+```
+
+
+```{r echo=FALSE}
+table(as.factor(Y_test), as.factor(rf_classifications))
+```
+
