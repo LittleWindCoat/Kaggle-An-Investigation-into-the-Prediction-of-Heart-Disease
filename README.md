@@ -1,0 +1,2 @@
+# Kaggle An Investigation into the Prediction of Heart Disease
+ According to the Centers for Disease Control and Prevention, heart disease is one of the leading causes of death for people of most races in the US. High blood pressure, high cholesterol, and smoking are several key risk factors for heart disease. Other key risk factors include diabetic status, obesity, drinking, not getting enough exercise, etc. This project aims to find out which variables have a significant effect on the likelihood of heart disease.
